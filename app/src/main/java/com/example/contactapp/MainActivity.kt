@@ -1,8 +1,10 @@
 package com.example.contactapp
 
-import android.app.Application
+import android.app.*
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.ContactsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -14,13 +16,34 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.ContentResolver
+import android.database.Cursor
+import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.app.ActivityCompat.requestPermissions
+import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.navigation.*
 import androidx.navigation.compose.*
-import androidx.room.*
+import androidx.room.ColumnInfo
+import androidx.room.Dao
+import androidx.room.Database
+import androidx.room.Delete
+import androidx.room.Entity
+import androidx.room.Insert
+import androidx.room.PrimaryKey
+import androidx.room.Query
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.Update
+
 import kotlinx.coroutines.*
 import com.example.contactapp.ui.theme.ContactAppTheme
 
@@ -48,7 +71,7 @@ interface ContactDao {
     suspend fun delete(contact: ContactEntity)
 }
 
-@Database(entities = [ContactEntity::class], version = 1)
+@Database(entities = [ContactEntity::class], version = 1, exportSchema = true)
 abstract class ContactDatabase : RoomDatabase() {
     abstract fun contactDao(): ContactDao
     companion object {
@@ -67,7 +90,7 @@ abstract class ContactDatabase : RoomDatabase() {
 }
 
 class ContactRepository(private val contactDao: ContactDao) {
-    val AllContacts: LiveData<List<ContactEntity>> = contactDao.getAllContacts()
+    val allContacts: LiveData<List<ContactEntity>> = contactDao.getAllContacts()
     suspend fun insert(contact: ContactEntity) {
         contactDao.insert(contact)
     }
@@ -79,6 +102,7 @@ class ContactRepository(private val contactDao: ContactDao) {
     suspend fun delete(contact: ContactEntity) {
         contactDao.delete(contact)
     }
+
 }
 
 class ContactViewModel(application: Application): AndroidViewModel(application) {
@@ -88,7 +112,7 @@ class ContactViewModel(application: Application): AndroidViewModel(application) 
     init {
         val contactDao = ContactDatabase.getDatabase(application).contactDao()
         repository = ContactRepository(contactDao)
-        allContacts = repository.AllContacts
+        allContacts = repository.allContacts
     }
 
     fun insert(contact: ContactEntity) = viewModelScope.launch(Dispatchers.IO) {
@@ -102,26 +126,24 @@ class ContactViewModel(application: Application): AndroidViewModel(application) 
     fun delete(contact: ContactEntity) = viewModelScope.launch(Dispatchers.IO) {
         repository.delete(contact)
     }
+
+    companion object {
+        private const val READ_CONTACTS_REQUEST_CODE = 100
+    }
 }
 
 @ExperimentalMaterial3Api
 @Composable
-fun ContactAppPage(navController: NavController, contactDao: ContactDao) {
+fun ContactAppPage(navController: NavController, contactViewModel: ContactViewModel) {
     // Use remember to keep the state across recompositions
-    var contactslist by remember { mutableStateOf(emptyList<Contact>()) }
-
-    // read contacts from room database
-    val contactViewModel: ContactViewModel = viewModel()
-    contactViewModel.allContacts.observeForever { contacts ->
-        contactslist = contacts.map { contactEntity ->
-            Contact(
-                id = contactEntity.id,
-                name = contactEntity.name,
-                phoneNumber = contactEntity.phoneNumber
-            )
-        }
+    val contactsentList by contactViewModel.allContacts.observeAsState(initial = emptyList())
+    val contactsList = contactsentList.map { contactEntity ->
+        Contact(
+            id = contactEntity.id,
+            name = contactEntity.name,
+            phoneNumber = contactEntity.phoneNumber
+        )
     }
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -147,16 +169,12 @@ fun ContactAppPage(navController: NavController, contactDao: ContactDao) {
             )
         },
         floatingActionButtonPosition = FabPosition.End
-    ) { innerPadding ->
-        LazyColumn(
+    ) { innerPadding -> LazyColumn(
             modifier = Modifier
                 .padding(innerPadding)
                 .fillMaxWidth(),
         ) {
-            // Display contacts in LazyColumn
-            items(contactslist) { contact ->
-                contactCard(contact = contact)
-            }
+            items(contactsList) { contact -> contactCard(contact = contact)}
         }
     }
 }
@@ -183,119 +201,104 @@ fun contactCard(contact: Contact) {
     }
 }
 
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 
-fun AppNavHost(    modifier: Modifier = Modifier,
-                   navController: NavHostController,
-                   context: Context
-) {
-
-
+fun AppNavHost(navController: NavHostController) {
     // Create Room database instance
     val contactDatabase = Room.databaseBuilder(
-        context.applicationContext,
+        LocalContext.current.applicationContext,
         ContactDatabase::class.java, "contact-database"
     ).build()
 
-    // Create ContactDao instance from Room database
+// Create ContactDao instance from Room database
     val contactDao = contactDatabase.contactDao()
+
+    val contactViewModel: ContactViewModel = viewModel()
     NavHost(navController = navController, startDestination = "contactAppPage") {
         composable("contactAppPage") {
-            ContactAppPage(navController = navController, contactDao = contactDao)
+            ContactAppPage(navController = navController, contactViewModel = contactViewModel)
         }
         composable("importContacts") {
-            ImportContactsActivity(navController = navController, contactDao = contactDao)
+            ImportContactsActivity(navController = navController, contactDao = contactDao, contactViewModel = contactViewModel)
         }
     }
 }
-
+@SuppressLint("Range")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ImportContactsActivity(navController: NavController, contactDao: ContactDao) {
-    // Use remember to keep the state across recompositions
-    var tempContacts by remember { mutableStateOf(emptyList<Contact>()) }
+fun ImportContactsActivity(navController: NavController, contactDao: ContactDao, contactViewModel: ContactViewModel) {
+    val contentResolver = LocalContext.current.contentResolver
+    val cursor =
+        contentResolver.query(ContactsContract.Contacts.CONTENT_URI, null, null, null, null);
 
-    // Logic to read contacts from the content resolver and add them to tempContacts
+    val tempContacts = emptyList<Contact>().toMutableList()
+    if (cursor != null && cursor.count > 0) {
+        while (cursor.moveToNext()) {
+            val contactId = cursor.getLong(cursor.getColumnIndex(ContactsContract.Contacts._ID))
+            val name =
+                cursor.getString(cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME))
+            val phoneNumber =
+                cursor.getString(cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER))
 
-    // Logic to handle checkbox selection and update tempContacts
-    val onCheckboxClick: (Contact) -> Unit = { contact ->
-        // Implement logic to toggle selection status of the contact
-    }
+            tempContacts += Contact(contactId, name, phoneNumber)
 
-    Scaffold(
-        topBar = {
-            // TopAppBar with "Save," "Update," and "Delete" buttons
-        },
-        content = {innerPadding ->
-            LazyColumn (modifier = Modifier
-                .padding(innerPadding)
-                .fillMaxWidth()){
-
-                // Display tempContacts with select/unselect options
-                items(tempContacts) { contact ->
-                    // Add checkbox to select/unselect contact
-                    // Update tempContacts list accordingly
-                    // Pass the selected contact to the click listener
-                    // to handle update and delete operations
-                }
+            // Logic to insert contacts into the Room database
+            tempContacts.forEach { contact ->
+                val contactEntity = ContactEntity(
+                    name = contact.name,
+                    phoneNumber = contact.phoneNumber
+                )
+                contactViewModel.insert(contactEntity)
             }
+            // Logic to handle checkbox selection and update tempContacts
+            val onCheckboxClick: (Contact) -> Unit = { contact ->
+                // Implement logic to toggle selection status of the contact
+            }
+            Scaffold(
+                topBar = {
+                    // TopAppBar with "Save," "Update," and "Delete" buttons
+                },
+                content = { innerPadding ->
+                    LazyColumn(
+                        modifier = Modifier
+                            .padding(innerPadding)
+                            .fillMaxWidth()
+                    ) {
+                        // Display tempContacts with select/unselect options
+                        items(tempContacts) { contact ->
+                            contactCard(contact = contact)
+                            // Add checkbox to select/unselect contact
+                            // Update tempContacts list accordingly
+                            // Pass the selected contact to the click listener
+                            // to handle update and delete operations
+                        }
+                    }
+                }
+            )
         }
-    )
-}
-
-suspend fun saveSelectedContacts(contactDao: ContactDao, contacts: List<Contact>) {
-    withContext(Dispatchers.IO) {
-        contacts.forEach { contact ->
-            val contactEntity = ContactEntity(name = contact.name, phoneNumber = contact.phoneNumber)
-            contactDao.insert(contactEntity)
-        }
     }
 }
-
-// Function to update a contact in Room database
-suspend fun updateContact(contactDao: ContactDao, contactEntity: ContactEntity) {
-    withContext(Dispatchers.IO) {
-        contactDao.update(contactEntity)
-    }
-}
-
-// Function to delete a contact from Room database
-suspend fun deleteContact(contactDao: ContactDao, contactEntity: ContactEntity) {
-    withContext(Dispatchers.IO) {
-        contactDao.delete(contactEntity)
-    }
-}
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContent {
             ContactAppTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    AppNavHost(navController = rememberNavController(), context = this)
-                }
+                    if (checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+                        // Permission granted, proceed with reading contacts
+                        AppNavHost(navController = rememberNavController())
+                    } else {
+                        // Request permission
+                        val READ_CONTACTS_REQUEST_CODE = 100
+                        requestPermissions(this, arrayOf(Manifest.permission.READ_CONTACTS), READ_CONTACTS_REQUEST_CODE)
+                    }
 
+                }
             }
         }
     }
 }
-
-
-//@OptIn(ExperimentalMaterial3Api::class)
-//@Preview(showBackground = false)
-//@Composable
-//fun GreetingPreview() {
-//    ContactAppTheme {
-//        Box(
-//            modifier = Modifier.fillMaxSize().background(Color.White),
-//        ) {
-//            ContactAppPage()
-//        }
-//    }
-//}
