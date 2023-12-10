@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -22,6 +23,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.*
 import androidx.navigation.compose.*
 import androidx.room.*
+import com.example.contactapp.ui.theme.ContactAppTheme
 import kotlinx.coroutines.*
 import java.io.Serializable
 
@@ -29,7 +31,8 @@ import java.io.Serializable
 data class ContactEntity(
     @PrimaryKey(autoGenerate = false) val id: Long = 0,
     @ColumnInfo(name = "name") val name: String,
-    @ColumnInfo(name = "phone_number") val phoneNumber: String
+    @ColumnInfo(name = "phoneNumber") val phoneNumber: String,
+    @ColumnInfo(name = "imageUri") val imageUri: String? = null
 )
 @Dao
 interface ContactDao {
@@ -52,7 +55,6 @@ abstract class ContactDatabase : RoomDatabase() {
     companion object {
         @Volatile
         private var Instance: ContactDatabase? = null
-
         fun getDatabase(context: Context): ContactDatabase {
             // if the Instance is not null, return it, otherwise create a new database instance.
             return Instance ?: synchronized(this) {
@@ -70,6 +72,7 @@ class ContactRepository(private val contactDao: ContactDao) {
         contactDao.insert(contact)
     }
     suspend fun update(contact: ContactEntity) {
+        Log.d("ContactRepository", "rUpdating contact with ID: ${contact.id}")
         contactDao.update(contact)
     }
     suspend fun delete(contact: ContactEntity) {
@@ -91,25 +94,12 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
         repository.insert(contact)
     }
     fun update(contact: ContactEntity) = viewModelScope.launch(Dispatchers.IO) {
+        Log.d("ContactViewModel", "vmUpdating contact with ID: ${contact.id}")
         repository.update(contact)
     }
     fun delete(contact: ContactEntity) = viewModelScope.launch(Dispatchers.IO) {
         repository.delete(contact)
     }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun AppNavHost(navController: NavHostController) {
-//    NavHost(navController = navController, startDestination = "contactAppPage") {
-//        composable("contactAppPage") {
-//            ContactAppPage(navController = navController, contactViewModel = contactViewModel)
-//        }
-//        composable("importContacts") {
-//            ImportContactsActivity(navController = navController, contactViewModel = contactViewModel)
-//        }
-//    }
-    // launch contactAppPage with intent
 }
 
 @Composable
@@ -132,32 +122,36 @@ fun RequestPermissionLauncher(
 class MainActivity : ComponentActivity() {
     private val permission : String = android.Manifest.permission.READ_CONTACTS
 
-    val continueAction: (contect : Context) -> Unit = { context ->
+    val continueAction: (context : Context) -> Unit = { context ->
         val contactDatabase = Room.databaseBuilder(
             context.applicationContext,
             ContactDatabase::class.java, "contact-database"
         ).build()
 
         val intent = Intent(this, ContactMainActivity::class.java)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         startActivity(intent)
     }
-    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            val context = LocalContext.current
-            if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
-                RequestPermissionLauncher(permission = permission) { isGranted ->
-                    if (!isGranted) {
-                        finish()
+            ContactAppTheme {
+                val context = LocalContext.current
+                if (ContextCompat.checkSelfPermission(
+                        this,
+                        permission
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    RequestPermissionLauncher(permission = permission) { isGranted ->
+                        if (!isGranted) {
+                            finish()
+                        } else {
+                            continueAction(context)
+                        }
                     }
-                    else{
-                        continueAction(context)
-                    }
+                } else {
+                    continueAction(context)
                 }
-            }
-            else{
-                continueAction(context)
             }
         }
     }
